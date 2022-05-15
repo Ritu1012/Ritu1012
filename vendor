@@ -1,0 +1,1237 @@
+*&---------------------------------------------------------------------*
+*& Report  RFFMCCRVENDORCREATE                                         *
+*&                                                                     *
+*&---------------------------------------------------------------------*
+*&                                                                     *
+*&                                                                     *
+*&---------------------------------------------------------------------*
+INCLUDE rffmccrvendorcreatetop                  .    " global Data
+INCLUDE rffmccrvendorcreate_sam.                         "Note 2913517
+
+TYPE-POOLS:  slis, sscr.
+
+DATA: lv_duns TYPE fmccrduns,
+      lv_duns4 TYPE fmccrduns4,
+      lv_cage TYPE fmccrcage,
+      lv_taxid TYPE c LENGTH 9,
+      lv_duns_lines TYPE i,
+      lv_duns4_lines TYPE i,
+      lv_cage_lines TYPE i,
+      lv_taxid_lines TYPE i,
+      lv_max TYPE i VALUE '100'.
+
+DATA: lt_ccrvendor TYPE STANDARD TABLE OF fmccrtvendor,
+      ls_ccrvendor TYPE fmccrtvendor,
+      lt_ccrvendorpoc TYPE STANDARD TABLE OF fmccrtvendorpoc,
+      ls_ccrvendorpoc TYPE fmccrtvendorpoc,
+      lt_createvndpoc TYPE STANDARD TABLE OF fmccrtvendorpoc,
+      lt_ccrupdates TYPE STANDARD TABLE OF fmccrtupdates,
+      lt_loclupdates TYPE STANDARD TABLE OF fmccrtupdates,
+      ls_ccrupdates TYPE fmccrtupdates,
+      ls_lfaccr TYPE fmfg_lfaccr,
+      lv_tfill TYPE sy-tfill,
+      lv_vendor_skip TYPE xfeld VALUE space,
+      alv_fieldcat TYPE slis_t_fieldcat_alv,
+      alv_layout TYPE slis_layout_alv,
+      statistik(93),             "used with ALV output
+      rpt_line1 LIKE sy-title,   "used with ALV output
+      rpt_line2 LIKE sy-title,   "used with ALV output
+      stichtag LIKE sy-title,    "used with ALV output
+      this_report LIKE sy-repid. "used with ALV output
+
+DATA:  BEGIN OF lt_nametab OCCURS 0.
+        INCLUDE STRUCTURE dntab.
+DATA:  END OF lt_nametab.
+
+* Table type used to display final report output
+DATA:  BEGIN OF ex_dunsvendor OCCURS 0.
+DATA:  box_sel TYPE xfeld,
+       status(1),
+       vendnum TYPE lifnr,
+       idocnum TYPE edi_docnum.
+        INCLUDE STRUCTURE fmccrtvendor.
+DATA:  END OF ex_dunsvendor.
+
+DATA: lt_dunsvendor LIKE ex_dunsvendor OCCURS 0,
+      ls_dunsvendor LIKE LINE OF ex_dunsvendor.
+
+DATA: ls_tede2 LIKE tede2,
+      ls_edidc LIKE edidc,
+      wa_edidc LIKE edidc,
+      h_logsys LIKE t000-logsys.
+
+SELECTION-SCREEN BEGIN OF BLOCK block1 WITH FRAME TITLE text-001.
+
+*Begin of Note 2913517 - Block 1
+SELECT-OPTIONS: so_samue FOR lv_sam_uei NO INTERVALS MODIF ID SAM,
+                so_samef FOR lv_sam_eft NO INTERVALS MODIF ID SAM.
+*End of Note 2913517 - Block 1
+
+SELECT-OPTIONS: so_duns FOR lv_duns NO INTERVALS,
+                so_duns4 FOR lv_duns4 NO INTERVALS MODIF ID CCR, "N2913517
+                so_cage FOR lv_cage NO INTERVALS,
+                so_taxid FOR lv_taxid NO INTERVALS.
+
+SELECTION-SCREEN END OF BLOCK block1.
+
+*Begin of Note 2913517 - Block 2
+SELECTION-SCREEN BEGIN OF BLOCK block2 WITH FRAME TITLE text-002.
+PARAMETERS:     p_samtab AS CHECKBOX USER-COMMAND samtab.
+SELECTION-SCREEN END OF BLOCK block2.
+
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR so_samue-low.
+*......................
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR so_samef-low.
+*......................
+*End of Note 2913517 - Block 2
+
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR so_duns-low.
+*......................
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR so_duns4-low.
+*......................
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR so_cage-low.
+*......................
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR so_taxid-low.
+*.......................
+
+*Begin of Note 2913517 - Block 3
+AT SELECTION-SCREEN OUTPUT.
+* Disable fields based on SAM Table checkbox...
+  IF p_samtab IS INITIAL.
+    CLEAR: so_samue[], so_samef[].
+    LOOP AT SCREEN.
+      IF SCREEN-GROUP1 = 'SAM'.
+       SCREEN-ACTIVE = 0.    " Disable SAM UEI/EFT fields
+        MODIFY SCREEN.
+      ENDIF.
+    ENDLOOP.
+  ELSE.
+    CLEAR: so_duns4[].
+    LOOP AT SCREEN.
+      IF SCREEN-GROUP1 = 'CCR'.
+        SCREEN-ACTIVE = 0.    " Disable DUNS4 field
+        MODIFY SCREEN.
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+*End of Note 2913517 - Block 3
+
+INITIALIZATION.
+  PERFORM restrict_select_options.
+
+START-OF-SELECTION.
+
+  CALL METHOD cl_exithandler=>get_instance
+    EXPORTING
+      exit_name              = 'FMFG_CCRVNDORMIGRATE'
+      null_instance_accepted = 'X'
+    CHANGING
+      instance               = l_fobu_migrate.
+
+* Create control record for IDOC structure, specify IDOC type, Msg type
+  wa_edidc-idoctp = c_idoc_type.
+  wa_edidc-mestyp = c_msg_type.
+  wa_edidc-direct = '2'. "Inbound process
+  CONCATENATE 'SAP' sy-sysid INTO wa_edidc-sndpor.
+  wa_edidc-sndprt = 'US'.  "USER partner type
+  wa_edidc-sndprn = 'CCR001'.  "USER partner number
+  CONCATENATE 'SAP' sy-sysid INTO wa_edidc-rcvpor.
+  CALL FUNCTION 'OWN_LOGICAL_SYSTEM_GET'
+    IMPORTING
+      own_logical_system             = h_logsys
+    EXCEPTIONS
+      own_logical_system_not_defined = 1
+      OTHERS                         = 2.
+  IF  sy-subrc IS INITIAL .
+    wa_edidc-rcvprt = 'LS'.
+    wa_edidc-rcvprn = h_logsys.
+  ELSE.
+    RAISE creation_error.
+  ENDIF.
+  wa_edidc-serial   = sy-datum.
+  wa_edidc-serial+8 = sy-uzeit.
+* End of Control Record creation
+
+* Retrieve all records from Updates table with an excode '2'
+* Indicates that a record is to be created
+
+  DESCRIBE TABLE so_duns LINES lv_duns_lines.
+  DESCRIBE TABLE so_duns4 LINES lv_duns4_lines.
+  DESCRIBE TABLE so_cage LINES lv_cage_lines.
+  DESCRIBE TABLE so_taxid LINES lv_taxid_lines.
+*Begin of Note 2913517 - Block 4
+  DESCRIBE TABLE so_samue LINES lv_sam_uei_lines.
+  DESCRIBE TABLE so_samef LINES lv_sam_eft_lines.
+
+* Process selections in partitions of 100 to ensure that no SQL errors
+* occur from large volume of selection entries
+  IF lv_sam_uei_lines > lv_max.
+    PERFORM select_sam_uei USING so_samue[] so_samef[] so_duns[] so_cage[] so_taxid[]
+                        CHANGING lt_ccrupdates lt_samupdates.
+  ELSEIF lv_sam_eft_lines > lv_max.
+    PERFORM select_sam_eft USING so_samue[] so_samef[] so_duns[] so_cage[] so_taxid[]
+                         CHANGING lt_ccrupdates lt_samupdates.
+  ELSEIF lv_duns_lines > lv_max.
+    PERFORM select_duns USING so_duns[] so_duns4[] so_cage[] so_taxid[] so_samue[] so_samef[]
+                        CHANGING lt_ccrupdates lt_samupdates.
+  ELSEIF lv_duns4_lines > lv_max.
+    PERFORM select_duns4 USING so_duns4[] so_duns[] so_cage[] so_taxid[]
+                         CHANGING lt_ccrupdates.
+  ELSEIF lv_cage_lines > lv_max.
+    PERFORM select_cage USING so_cage[] so_duns[] so_duns4[] so_taxid[] so_samue[] so_samef[]
+                        CHANGING lt_ccrupdates lt_samupdates.
+  ELSEIF lv_taxid_lines > lv_max.
+    PERFORM select_taxid USING so_taxid[] so_duns[] so_duns4[] so_cage[] so_samue[] so_samef[]
+                         CHANGING lt_ccrupdates lt_samupdates.
+  ELSE.
+* Perform normal selects...
+    IF p_samtab IS INITIAL.
+*End of Note 2913517 - Block 5
+      SELECT * FROM fmccrtupdates INTO TABLE lt_ccrupdates
+        WHERE duns   IN so_duns
+          AND duns4  IN so_duns4
+          AND cage   IN so_cage
+          AND taxid  IN so_taxid
+          AND excode EQ '2'.
+*Begin of Note 2913517 - Block 6
+     ELSE.
+      SELECT * FROM fmsamtupdates INTO TABLE lt_samupdates
+        WHERE sam_ue_id   IN so_samue
+          AND sam_eft_ind IN so_samef
+          AND duns        IN so_duns
+          AND cage        IN so_cage
+          AND taxid       IN so_taxid
+          AND excode      EQ '2'.
+     ENDIF.
+*End of Note 2913517 - Block 6
+  ENDIF.
+
+* Suite on HANA SELECTSORT ATC Adjustment
+  SORT lt_ccrupdates BY duns duns4 cage.                 "Note 1859602
+  SORT lt_samupdates BY sam_ue_id sam_eft_ind cage.      "Note 2913517
+
+  WHILE ( NOT lt_ccrupdates[] IS INITIAL ).
+    DESCRIBE TABLE lt_ccrupdates LINES sy-tfill.
+    lv_tfill = sy-tfill.
+    IF lv_tfill GE 5.
+      APPEND LINES OF lt_ccrupdates FROM 1 TO 5 TO lt_loclupdates.
+      DELETE lt_ccrupdates FROM 1 TO 5.
+    ELSE.
+      APPEND LINES OF lt_ccrupdates FROM 1 TO lv_tfill TO lt_loclupdates.
+      DELETE lt_ccrupdates FROM 1 TO lv_tfill.
+    ENDIF.
+
+    LOOP AT lt_loclupdates INTO ls_ccrupdates.
+* Retrieve individual vendor record from the database
+      SELECT SINGLE * FROM fmccrtvendor INTO ls_ccrvendor
+      WHERE duns = ls_ccrupdates-duns
+      AND duns4 = ls_ccrupdates-duns4
+      AND cage = ls_ccrupdates-cage.
+
+* Retrieve POC records for selected vendor from database
+      SELECT * FROM fmccrtvendorpoc INTO TABLE lt_ccrvendorpoc
+      WHERE duns = ls_ccrupdates-duns
+      AND duns4 = ls_ccrupdates-duns4
+      AND cage = ls_ccrupdates-cage.
+
+* Move control record data to local structure which is cleared
+* after each IDOC is created
+      ls_edidc = wa_edidc.
+
+* Call Create Method from class CL_EX_FMFG_CCRVNDORMIGRATE
+      IF NOT l_fobu_migrate IS INITIAL.
+        CLEAR lv_vendor_skip.
+        CALL METHOD l_fobu_migrate->create
+          EXPORTING
+            is_ccrvendor    = ls_ccrvendor
+            it_ccrvendorpoc = lt_ccrvendorpoc
+          IMPORTING
+            et_e1lfa1m      = et_e1lfa1m
+            et_e1lfa1a      = et_e1lfa1a
+            et_e1lfa1b      = et_e1lfa1b
+            et_e1lfa1h      = et_e1lfa1h
+            et_e1lfa1l      = et_e1lfa1l
+            et_e1lfb1m      = et_e1lfb1m
+            et_e1lfbwm      = et_e1lfbwm
+            et_e1lfb5m      = et_e1lfb5m
+            et_e1lfb1h      = et_e1lfb1h
+            et_e1lfb1l      = et_e1lfb1l
+            et_e1lfm1m      = et_e1lfm1m
+            et_e1lfm2m      = et_e1lfm2m
+            et_e1wyt3m      = et_e1wyt3m
+            et_e1lfm1h      = et_e1lfm1h
+            et_e1lfm1l      = et_e1lfm1l
+            et_e1lfbkm      = et_e1lfbkm
+            et_e1lfasm      = et_e1lfasm
+            et_e1wyt1m      = et_e1wyt1m
+            et_e1wyttm      = et_e1wyttm
+            ev_vendor_skip  = lv_vendor_skip.
+      ENDIF.
+* LV_VENDOR_SKIP allows user to select the vendors they wish to create
+* through the BADI implementation.
+      CHECK lv_vendor_skip NE 'X'.
+* Create IDOC structure by populating segments used.
+      IF et_e1lfa1m IS INITIAL.
+        EXIT.
+      ELSE.
+        lt_edidd-segnam = c_e1lfa1m.
+        lt_edidd-sdata = et_e1lfa1m.
+        APPEND lt_edidd.
+        CLEAR et_e1lfa1m.
+      ENDIF.
+      IF NOT et_e1lfa1b IS INITIAL.
+* This segment holds CCR vendor data - it must be populated
+        lt_edidd-segnam = c_e1lfa1b.
+        lt_edidd-sdata = et_e1lfa1b.
+        APPEND lt_edidd.
+        CLEAR et_e1lfa1b.
+      ELSE.
+        EXIT.
+      ENDIF.
+      IF NOT et_e1lfa1a IS INITIAL.
+        lt_edidd-segnam = c_e1lfa1a.
+        lt_edidd-sdata = et_e1lfa1a.
+        APPEND lt_edidd.
+        CLEAR et_e1lfa1a.
+      ENDIF.
+      IF NOT et_e1lfa1h IS INITIAL.
+        lt_edidd-segnam = c_e1lfa1h.
+        lt_edidd-sdata = et_e1lfa1h.
+        APPEND lt_edidd.
+        CLEAR et_e1lfa1h.
+      ENDIF.
+      IF NOT et_e1lfa1l IS INITIAL.
+        lt_edidd-segnam = c_e1lfa1l.
+        lt_edidd-sdata = et_e1lfa1l.
+        APPEND lt_edidd.
+        CLEAR et_e1lfa1l.
+      ENDIF.
+      IF NOT et_e1lfb1m IS INITIAL.
+        lt_edidd-segnam = c_e1lfb1m.
+        lt_edidd-sdata = et_e1lfb1m.
+        APPEND lt_edidd.
+        CLEAR et_e1lfb1m.
+      ENDIF.
+      IF NOT et_e1lfbwm IS INITIAL.
+        lt_edidd-segnam = c_e1lfbwm.
+        lt_edidd-sdata = et_e1lfbwm.
+        APPEND lt_edidd.
+        CLEAR et_e1lfbwm.
+      ENDIF.
+      IF NOT et_e1lfb5m IS INITIAL.
+        lt_edidd-segnam = c_e1lfb5m.
+        lt_edidd-sdata = et_e1lfb5m.
+        APPEND lt_edidd.
+        CLEAR et_e1lfb5m.
+      ENDIF.
+      IF NOT et_e1lfb1h IS INITIAL.
+        lt_edidd-segnam = c_e1lfb1h.
+        lt_edidd-sdata = et_e1lfb1h.
+        APPEND lt_edidd.
+        CLEAR et_e1lfb1h.
+      ENDIF.
+      IF NOT et_e1lfb1l IS INITIAL.
+        lt_edidd-segnam = c_e1lfb1l.
+        lt_edidd-sdata = et_e1lfb1l.
+        APPEND lt_edidd.
+        CLEAR et_e1lfb1l.
+      ENDIF.
+      IF NOT et_e1lfm1m IS INITIAL.
+        lt_edidd-segnam = c_e1lfm1m.
+        lt_edidd-sdata = et_e1lfm1m.
+        APPEND lt_edidd.
+        CLEAR et_e1lfm1m.
+      ENDIF.
+      IF NOT et_e1lfm2m IS INITIAL.
+        lt_edidd-segnam = c_e1lfm2m.
+        lt_edidd-sdata = et_e1lfm2m.
+        APPEND lt_edidd.
+        CLEAR et_e1lfm2m.
+      ENDIF.
+      IF NOT et_e1wyt3m IS INITIAL.
+        lt_edidd-segnam = c_e1wyt3m.
+        lt_edidd-sdata = et_e1wyt3m.
+        APPEND lt_edidd.
+        CLEAR et_e1wyt3m.
+      ENDIF.
+      IF NOT et_e1lfm1h IS INITIAL.
+        lt_edidd-segnam = c_e1lfm1h.
+        lt_edidd-sdata = et_e1lfm1h.
+        APPEND lt_edidd.
+        CLEAR et_e1lfm1h.
+      ENDIF.
+      IF NOT et_e1lfm1l IS INITIAL.
+        lt_edidd-segnam = c_e1lfm1l.
+        lt_edidd-sdata = et_e1lfm1l.
+        APPEND lt_edidd.
+        CLEAR et_e1lfm1l.
+      ENDIF.
+      IF NOT et_e1lfbkm IS INITIAL.
+        lt_edidd-segnam = c_e1lfbkm.
+        lt_edidd-sdata = et_e1lfbkm.
+        APPEND lt_edidd.
+        CLEAR et_e1lfbkm.
+      ENDIF.
+      IF NOT et_e1lfasm IS INITIAL.
+        lt_edidd-segnam = c_e1lfasm.
+        lt_edidd-sdata = et_e1lfasm.
+        APPEND lt_edidd.
+        CLEAR et_e1lfasm.
+      ENDIF.
+      IF NOT et_e1wyt1m IS INITIAL.
+        lt_edidd-segnam = c_e1wyt1m.
+        lt_edidd-sdata = et_e1wyt1m.
+        APPEND lt_edidd.
+        CLEAR et_e1wyt1m.
+      ENDIF.
+      IF NOT et_e1wyttm IS INITIAL.
+        lt_edidd-segnam = c_e1wyttm.
+        lt_edidd-sdata = et_e1wyttm.
+        APPEND lt_edidd.
+        CLEAR et_e1wyttm.
+      ENDIF.
+
+*IDOC creation.  IDOCs created one at a time.
+      IF NOT ls_tede2 IS INITIAL.
+        CLEAR ls_tede2.
+      ENDIF.
+      CALL FUNCTION 'IDOC_INBOUND_WRITE_TO_DB'
+        EXPORTING
+          pi_do_handle_error      = 'X'
+          pi_return_data_flag     = ' '
+        IMPORTING
+          pe_idoc_number          = ef_idocnum
+          pe_state_of_processing  = lf_process_state
+          pe_inbound_process_data = ls_tede2
+        TABLES
+          t_data_records          = lt_edidd
+        CHANGING
+          pc_control_record       = ls_edidc
+        EXCEPTIONS
+          idoc_not_saved          = 1
+          OTHERS                  = 2.
+      IF sy-subrc <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+      ELSE.
+        COMMIT WORK.
+      ENDIF.
+      IF lf_process_state IS INITIAL.
+* Append control record
+* Should the checks be put in here to handle the status codes?
+        APPEND ls_edidc TO lt_edidc.
+        CLEAR ls_edidc.
+* Append data record
+        CLEAR lt_edidd[].
+        REFRESH lt_edidd.
+* Append local table to be used to output list of created vendors
+        MOVE-CORRESPONDING ls_ccrvendor TO ls_dunsvendor.
+        ls_dunsvendor-idocnum = ef_idocnum.
+        APPEND ls_dunsvendor TO lt_dunsvendor.
+        CLEAR ls_dunsvendor.
+      ELSE.
+* Some issue with IDOC creation, Vendor data to be displayed in
+* final output.
+        MOVE-CORRESPONDING ls_ccrvendor TO ls_dunsvendor.
+        ls_dunsvendor-idocnum = ef_idocnum.
+* Stopsign is RED.
+        ls_dunsvendor-status = 1.
+        APPEND ls_dunsvendor TO lt_dunsvendor.
+        CLEAR: ls_dunsvendor.
+      ENDIF.
+      CLEAR: ls_ccrvendor,
+             lt_ccrvendorpoc,
+             ls_ccrupdates.
+    ENDLOOP.
+    CLEAR lt_loclupdates[].
+  ENDWHILE.
+
+*End of Note 2913517 - Block 7
+*- Generate SAM Vendor IDOCS...
+  IF NOT lt_samupdates[] IS INITIAL.
+    PERFORM sam_create_idocs TABLES lt_samupdates[]
+                                    lt_edidc[]
+                              USING wa_edidc.
+  ENDIF.
+*End of Note 2913517 - Block 7
+
+* Start inbound - This will create the Vendor Master record
+  CALL FUNCTION 'IDOC_START_INBOUND'
+    EXPORTING
+      pi_inbound_process_data       = ls_tede2
+    TABLES
+      t_control_records             = lt_edidc
+*      t_data_records                =
+    EXCEPTIONS
+      invalid_document_number       = 1
+      error_before_call_application = 2
+      inbound_process_not_possible  = 3
+      old_wf_start_failed           = 4
+      wf_task_error                 = 5
+      serious_inbound_error         = 6
+      OTHERS                        = 7.
+  IF sy-subrc <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+  ELSE.
+    COMMIT WORK.
+    LOOP AT lt_edidc INTO ls_edidc.
+      LOOP AT lt_dunsvendor INTO ls_dunsvendor
+      WHERE idocnum EQ ls_edidc-docnum.
+* Stoplight is GREEN
+        ls_dunsvendor-status = 3.
+        MODIFY lt_dunsvendor FROM ls_dunsvendor.
+* Assign newly created vendor number to output record based on value
+* stored in table FMFG_LFACCR
+        SELECT SINGLE lifnr FROM fmfg_lfaccr INTO ls_dunsvendor-vendnum
+        WHERE duns = ls_dunsvendor-duns
+        AND duns4 = ls_dunsvendor-duns4
+        AND cage = ls_dunsvendor-cage.
+        IF sy-subrc <> 0.
+* Vendor not created.  Status should be changed to reflect
+          ls_dunsvendor-status = 1.
+        ENDIF.
+        MODIFY lt_dunsvendor FROM ls_dunsvendor.
+
+        SELECT SINGLE * FROM fmccrtvendor INTO ls_ccrvendor
+        WHERE duns = ls_dunsvendor-duns
+        AND duns4 = ls_dunsvendor-duns4
+        AND cage = ls_dunsvendor-cage.
+* Clear EXCODE field in FMCCRTVENDOR table
+        IF NOT ls_ccrvendor-excode IS INITIAL.
+          CLEAR ls_ccrvendor-excode.
+          UPDATE fmccrtvendor FROM ls_ccrvendor.
+        ENDIF.
+* If the vendor was NOT created - the FMCCRTUPDATES record should not be
+* deleted
+        IF NOT ls_dunsvendor-status = 1.
+* Delete record of vendor(s) from FMCCRTUPDATES successfully created
+          SELECT SINGLE * FROM fmccrtupdates INTO ls_ccrupdates
+          WHERE duns = ls_dunsvendor-duns
+          AND duns4 = ls_dunsvendor-duns4
+          AND cage = ls_dunsvendor-cage.
+          DELETE fmccrtupdates FROM ls_ccrupdates.
+        ENDIF.
+        CLEAR: ls_ccrupdates,
+               ls_ccrvendor,
+               ls_dunsvendor.
+      ENDLOOP.
+
+*Begin of Note 2913517 - Block 8
+*--- Process SAM vendor updates...
+      LOOP AT gt_samueivendor INTO ls_samueivendor
+        WHERE idocnum EQ ls_edidc-docnum.
+* Stoplight is GREEN
+        ls_samueivendor-status = 3.
+        MODIFY gt_samueivendor FROM ls_samueivendor.
+* Assign newly created vendor number to output record based on value
+* stored in table FMFG_LFACCR
+        SELECT SINGLE lifnr FROM fmfg_lfaccr INTO ls_samueivendor-vendnum
+          WHERE sam_ue_id   = ls_samueivendor-sam_ue_id
+            AND sam_eft_ind = ls_samueivendor-sam_eft_ind
+            AND cage        = ls_samueivendor-cage.
+        IF sy-subrc <> 0.
+* Vendor not created.  Status should be changed to reflect
+          ls_samueivendor-status = 1.
+        ENDIF.
+        MODIFY gt_samueivendor FROM ls_samueivendor.
+
+        SELECT SINGLE * FROM fmsamtvendor INTO ls_samvendor
+          WHERE sam_ue_id   = ls_samueivendor-sam_ue_id
+            AND sam_eft_ind = ls_samueivendor-sam_eft_ind
+            AND cage        = ls_samueivendor-cage.
+* Clear EXCODE field in FMCCRTVENDOR table
+        IF NOT ls_samvendor-excode IS INITIAL.
+          CLEAR ls_samvendor-excode.
+          UPDATE fmsamtvendor FROM ls_samvendor.
+        ENDIF.
+* If the vendor was NOT created - the FMCCRTUPDATES record should not be
+* deleted
+        IF NOT ls_samueivendor-status = 1.
+* Delete record of vendor(s) from FMCCRTUPDATES successfully created
+          SELECT SINGLE * FROM fmsamtupdates INTO ls_samupdates
+            WHERE sam_ue_id   = ls_samueivendor-sam_ue_id
+              AND sam_eft_ind = ls_samueivendor-sam_eft_ind
+              AND cage        = ls_samueivendor-cage.
+          DELETE fmsamtupdates FROM ls_samupdates.
+        ENDIF.
+        CLEAR: ls_samupdates,
+               ls_samvendor,
+               ls_samueivendor.
+      ENDLOOP.
+*End of Note 2913517 - Block 8
+
+    ENDLOOP.
+    CLEAR: ls_edidc, lt_edidc.
+    REFRESH lt_edidc.
+  ENDIF.
+
+*Begin of Note 2913517 - Block 9
+  IF p_samtab IS INITIAL.
+    lv_tabname   = 'FMCCRTVENDOR'.
+    lv_strucname = 'LT_DUNSVENDOR'.
+    ASSIGN lt_dunsvendor TO <fs_table>.
+  ELSE.
+    lv_tabname   = 'FMSAMTVENDOR'.
+    lv_strucname = 'LT_SAMUEIVENDOR'.
+    ASSIGN gt_samueivendor TO <fs_table>.
+  ENDIF.
+*End of Note 2913517 - Block 9
+
+* Create fieldcatalog for ALV output
+  PERFORM fieldcat_create TABLES alv_fieldcat
+                                 lt_nametab
+                           USING lv_tabname              "Note 2913517
+                                 lv_strucname.           "Note 2913517
+
+  IF p_samtab IS INITIAL.                                "Note 2913517
+    DESCRIBE TABLE lt_dunsvendor LINES sy-tfill.
+*Begin of Note 2913517 - Block 10
+  ELSE.
+    DESCRIBE TABLE gt_samueivendor LINES sy-tfill.
+  ENDIF.
+*End of Note 2913517 - Block 10
+
+  WRITE sy-tfill TO statistik LEFT-JUSTIFIED.
+
+  IF sy-tfill = 1.
+    CONCATENATE statistik text-011 text-013 INTO statistik SEPARATED BY
+    space.
+  ELSE.
+    CONCATENATE statistik text-012 text-013 INTO statistik SEPARATED BY
+    space.
+  ENDIF.
+
+  this_report = sy-repid.
+  rpt_line2 = text-014.
+  WRITE sy-datum TO rpt_line1 MM/DD/YYYY.
+
+* Set variables in ALV layout table to allow for a specific ALV display
+  alv_layout-colwidth_optimize = 'X'.
+  alv_layout-zebra = 'X'.
+  alv_layout-box_fieldname = 'BOX_SEL'.
+  alv_layout-lights_fieldname = 'STATUS'.
+  alv_layout-lights_tabname = lv_strucname.              "Note 2913517
+
+* Final display of report output
+  CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+   EXPORTING
+*   I_INTERFACE_CHECK                 = ' '
+*   I_BYPASSING_BUFFER                = ' '
+*   I_BUFFER_ACTIVE                   = ' '
+     i_callback_program                = this_report
+     i_callback_pf_status_set          = 'ALV_SET_STATUS'
+     i_callback_user_command           = 'ALV_USER_COMMAND'
+     i_callback_top_of_page            = 'ALV_TOP_OF_PAGE'
+     i_callback_html_top_of_page       = 'ALV_HTML_TOP_OF_PAGE'
+*   I_CALLBACK_HTML_END_OF_LIST       = ' '
+*   I_STRUCTURE_NAME                  =
+*   I_BACKGROUND_ID                   = ' '
+     i_grid_title                      = rpt_line1
+*   I_GRID_SETTINGS                   =
+     is_layout                         = alv_layout
+     it_fieldcat                       = alv_fieldcat
+*   IT_EXCLUDING                      =
+*   IT_SPECIAL_GROUPS                 =
+*   IT_SORT                           =
+*   IT_FILTER                         =
+*   IS_SEL_HIDE                       =
+*   I_DEFAULT                         = 'X'
+*   I_SAVE                            = ' '
+*   IS_VARIANT                        =
+*   IT_EVENTS                         =
+*   IT_EVENT_EXIT                     =
+*   IS_PRINT                          =
+*   IS_REPREP_ID                      =
+*   I_SCREEN_START_COLUMN             = 0
+*   I_SCREEN_START_LINE               = 0
+*   I_SCREEN_END_COLUMN               = 0
+*   I_SCREEN_END_LINE                 = 0
+*   IT_ALV_GRAPHICS                   =
+*   IT_HYPERLINK                      =
+*   IT_ADD_FIELDCAT                   =
+*   IT_EXCEPT_QINFO                   =
+*   I_HTML_HEIGHT_TOP                 =
+*   I_HTML_HEIGHT_END                 =
+* IMPORTING
+*   E_EXIT_CAUSED_BY_CALLER           =
+*   ES_EXIT_CAUSED_BY_USER            =
+    TABLES
+      t_outtab                          = <fs_table>     "Note 2913517
+   EXCEPTIONS
+     program_error                     = 1
+     OTHERS                            = 2
+            .
+  IF sy-subrc <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+  ENDIF.
+
+*&---------------------------------------------------------------------*
+*&      Form  fieldcat_create
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_ALV_FIELDCAT  text
+*      -->P_LT_NAMETAB  text
+*----------------------------------------------------------------------*
+FORM fieldcat_create  TABLES   p_alv TYPE slis_t_fieldcat_alv
+                               p_nametab STRUCTURE lt_nametab
+                       USING   p_tabname   TYPE tabname  "Note 2913517
+                               p_strucname TYPE tabname. "Note 2913517
+
+  DATA:  wa_nametab LIKE LINE OF p_nametab,
+         wa_alv LIKE LINE OF p_alv.
+
+  wa_alv-fieldname = 'STATUS'.
+  wa_alv-datatype = 'C'.
+  wa_alv-outputlen = '6'.
+  wa_alv-seltext_l = 'Status'(009).
+  wa_alv-seltext_m = text-009.
+  wa_alv-seltext_s = 'Stat'(010).
+  wa_alv-text_fieldname = text-009.
+
+  wa_alv-reptext_ddic = text-009.
+  APPEND wa_alv TO p_alv.
+  CLEAR wa_alv.
+
+  wa_alv-fieldname = 'VENDNUM'.
+  wa_alv-ref_tabname = 'LFA1'.
+  wa_alv-ref_fieldname = 'LIFNR'.
+  wa_alv-reptext_ddic = 'Vendor Number'(008).
+  APPEND wa_alv TO p_alv.
+  CLEAR wa_alv.
+
+  wa_alv-fieldname = 'IDOCNUM'.
+  wa_alv-ref_tabname = 'EDIDC'.
+  wa_alv-ref_fieldname = 'DOCNUM'.
+  wa_alv-reptext_ddic = 'IDOC Number'(007).
+  APPEND wa_alv TO p_alv.
+  CLEAR wa_alv.
+
+  CALL FUNCTION 'NAMETAB_GET'                               "#EC *
+   EXPORTING
+     langu                     = sy-langu
+     only                      = ' '
+     tabname                   = p_tabname               "Note 2913517
+* IMPORTING
+*   HEADER                    =
+*   RC                        =
+    TABLES
+      nametab                   = p_nametab
+   EXCEPTIONS
+     internal_error            = 1
+     table_has_no_fields       = 2
+     table_not_activ           = 3
+     no_texts_found            = 4
+     OTHERS                    = 5
+            .
+  IF sy-subrc <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*         WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+  ENDIF.
+
+  LOOP AT p_nametab INTO wa_nametab.
+    wa_alv-tabname = p_strucname.                        "Note 2913517
+
+    IF wa_nametab-fieldname = 'MANDT'.
+*Skip
+    ELSE.
+      wa_alv-fieldname = wa_nametab-fieldname.
+      wa_alv-ref_tabname = wa_nametab-tabname.
+      wa_alv-ref_fieldname = wa_nametab-fieldname.
+      wa_alv-reptext_ddic = wa_nametab-fieldtext.
+      APPEND wa_alv TO p_alv.
+      CLEAR: wa_nametab,
+             wa_alv.
+    ENDIF.
+  ENDLOOP.
+
+
+
+
+ENDFORM.                    " fieldcat_create
+
+*&--------------------------------------------------------------------*
+*&      Form  alv_set_status
+*&--------------------------------------------------------------------*
+*       Sets the GUI status of the report using the ALV Grid
+*---------------------------------------------------------------------*
+*      -->P_EXTAB    Not currently used.
+*---------------------------------------------------------------------*
+FORM alv_set_status                                         "#EC CALLED
+  USING p_extab TYPE slis_t_extab.                          "#EC CALLED
+
+  DELETE TABLE p_extab WITH TABLE KEY fcode = '&NFO'.
+
+* set user defined gui status
+  SET PF-STATUS 'ALV_USER_STATUS' EXCLUDING p_extab.
+
+ENDFORM.                               " ALV_SET_STATUS
+
+*&---------------------------------------------------------------------
+
+*&      Form  ALV_HTML_TOP_OF_PAGE
+*&---------------------------------------------------------------------
+
+*       handle event 'HTML-TOP-OF-PAGE'
+*----------------------------------------------------------------------
+
+*  -->  R_DDOC  reference to class C_DD_DOCUMENT
+*----------------------------------------------------------------------
+
+FORM alv_html_top_of_page                                   "#EC CALLED
+  USING r_ddoc TYPE REF TO cl_dd_document.                  "#EC CALLED
+*
+  DATA: text TYPE sdydo_text_element.
+
+* clear header
+  CALL METHOD r_ddoc->initialize_document.
+
+* Listtitle
+  IF NOT rpt_line2 IS INITIAL.
+    WRITE rpt_line2 TO text.
+    CALL METHOD r_ddoc->add_text
+      EXPORTING
+        text      = text
+        sap_style = 'HEADING'.
+    CALL METHOD r_ddoc->new_line.
+  ENDIF.
+
+* Headerline
+  IF NOT stichtag IS INITIAL.
+    WRITE stichtag TO text.
+    CALL METHOD r_ddoc->new_line.
+    CALL METHOD r_ddoc->add_text
+      EXPORTING
+        text         = text
+        sap_emphasis = 'STRONG'.
+  ENDIF.
+ENDFORM.                    "alv_html_top_of_page
+
+*---------------------------------------------------------------------*
+*       FORM ALV_TOP_OF_PAGE                                          *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+FORM alv_top_of_page.                                       "#EC CALLED
+* print header information
+  IF NOT this_report IS INITIAL.
+    WRITE: / rpt_line2.
+    SKIP.
+  ENDIF.
+  IF NOT stichtag IS INITIAL.
+    WRITE: / stichtag.
+    SKIP.
+  ENDIF.
+ENDFORM.                    "alv_top_of_page
+
+*&---------------------------------------------------------------------
+
+*&      Form  ALV_USER_COMMAND
+*&---------------------------------------------------------------------
+
+*       Allows for the local program to intercept user commands and
+*       process them locally, instead of letting the system handle them.
+*       CBL6BK008076 - Form uncommented to utilize Error Logging
+*----------------------------------------------------------------------
+
+*      -->P_R_UCOMM  like sy-ucomm
+*----------------------------------------------------------------------
+*
+FORM alv_user_command USING p_ucomm LIKE sy-ucomm           "#EC CALLED
+                         p_rs_selfield TYPE slis_selfield.  "#EC CALLED
+
+  DATA:  seltab TYPE STANDARD TABLE OF rsparams,
+         ls_seltab TYPE rsparams,
+         lt_bdcdata TYPE TABLE OF bdcdata,
+         ls_bdcdata TYPE bdcdata,
+         ls_lfb1 TYPE lfb1,
+         ls_lfm1 TYPE lfm1,
+         ls_vendor LIKE LINE OF ex_dunsvendor.
+
+* react on user commands
+  CASE p_ucomm.
+    WHEN '&IDOC'.
+* Call report to display IDOC data (trans. WE02) by passing the selected
+* records' IDOC numbers as parameters
+      CLEAR ls_dunsvendor.
+      LOOP AT lt_dunsvendor INTO ls_dunsvendor
+      WHERE box_sel = 'X'.
+        ls_seltab-selname = 'DOCNUM'.
+        ls_seltab-kind = 'S'.
+        ls_seltab-sign = 'I'.
+        ls_seltab-option = 'EQ'.
+        ls_seltab-low = ls_dunsvendor-idocnum.
+        APPEND ls_seltab TO seltab.
+        CLEAR ls_seltab.
+      ENDLOOP.
+      SUBMIT rseidoc2 WITH SELECTION-TABLE seltab AND RETURN.
+* Display vendor
+    WHEN '&IC1'.
+      IF p_rs_selfield-fieldname = 'VENDNUM'.
+        READ TABLE lt_dunsvendor INTO ls_vendor INDEX
+                                     p_rs_selfield-tabindex.
+* Retrieve company code and purchasing organization for vendor
+        SELECT SINGLE * FROM lfb1 INTO ls_lfb1 WHERE lifnr EQ ls_vendor-vendnum.
+        SELECT SINGLE * FROM lfm1 INTO ls_lfm1 WHERE lifnr EQ ls_vendor-vendnum.
+        ls_bdcdata-program  = 'SAPMF02K'.
+        ls_bdcdata-dynpro  = '101'.
+        ls_bdcdata-dynbegin = 'X'.
+        APPEND ls_bdcdata TO lt_bdcdata.
+        CLEAR ls_bdcdata.
+* pass the vendor number
+        ls_bdcdata-fnam     = 'RF02K-LIFNR'.
+        ls_bdcdata-fval    = p_rs_selfield-value.
+        APPEND ls_bdcdata TO lt_bdcdata.
+        CLEAR ls_bdcdata.
+* pass the company code
+        ls_bdcdata-fnam     = 'RF02K-BUKRS'.
+        ls_bdcdata-fval    = ls_lfb1-bukrs.
+        APPEND ls_bdcdata TO lt_bdcdata.
+        CLEAR ls_bdcdata.
+* pass the purchasing organization
+        ls_bdcdata-fnam     = 'RF02K-EKORG'.
+        ls_bdcdata-fval    = ls_lfm1-ekorg.
+        APPEND ls_bdcdata TO lt_bdcdata.
+        CLEAR ls_bdcdata.
+        ls_bdcdata-fnam     = 'RF02K-D0110'.
+        ls_bdcdata-fval    = 'X'.
+        APPEND ls_bdcdata TO lt_bdcdata.
+        CLEAR ls_bdcdata.
+        ls_bdcdata-fnam     = 'RF02K-D0120'.
+        ls_bdcdata-fval    = 'X'.
+        APPEND ls_bdcdata TO lt_bdcdata.
+*        CALL TRANSACTION 'XK03' USING lt_bdcdata MODE 'A'.
+        TRY.
+          CALL TRANSACTION 'XK03' WITH AUTHORITY-CHECK
+               USING lt_bdcdata MODE 'A'.
+
+          CATCH cx_sy_authorization_error.
+            MESSAGE ID 'EU' TYPE 'A' NUMBER '059' WITH 'XK03'.
+        ENDTRY.
+
+      ENDIF.
+*   show select options
+    WHEN '&NFO'.
+      CLEAR sy-ucomm.
+  ENDCASE.
+
+  CLEAR p_ucomm.
+
+ENDFORM.                               " ALV_USER_COMMAND
+
+*&--------------------------------------------------------------------*
+*&      Form  restrict_select_options
+*&--------------------------------------------------------------------*
+*   Restrict the selection options
+*---------------------------------------------------------------------*
+FORM restrict_select_options.
+
+  DATA: ls_restrict_options TYPE sscr_restrict,
+        ls_opt_list TYPE sscr_opt_list,
+        ls_sscr_ass TYPE sscr_ass.
+
+* Define the option list
+* BASIC: EQ and BT options available
+  MOVE 'BASIC' TO ls_opt_list-name.
+  MOVE 'X' TO ls_opt_list-options-eq.
+  APPEND ls_opt_list TO ls_restrict_options-opt_list_tab.
+* Assign selection screen objects to option list and sign
+* KIND = 'A': applies to all SELECT-OPTIONS
+  MOVE: 'A'          TO ls_sscr_ass-kind,
+        'I'          TO ls_sscr_ass-sg_main,
+        'BASIC'      TO ls_sscr_ass-op_main.
+  APPEND ls_sscr_ass TO ls_restrict_options-ass_tab.
+
+* Restrict the select options available to user
+  CALL FUNCTION 'SELECT_OPTIONS_RESTRICT'
+    EXPORTING
+      program                      = sy-cprog
+      restriction                  = ls_restrict_options
+*   DB                           = ' '
+ EXCEPTIONS
+   too_late                     = 1
+   repeated                     = 2
+   selopt_without_options       = 3
+   selopt_without_signs         = 4
+   invalid_sign                 = 5
+   empty_option_list            = 6
+   invalid_kind                 = 7
+   repeated_kind_a              = 8
+   OTHERS                       = 9
+            .
+  IF sy-subrc <> 0.
+    "This should never occur
+  ENDIF.
+
+ENDFORM.                    " restrict_select_options
+*&---------------------------------------------------------------------*
+*&      Form  select_duns
+*&---------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+*      --> pt_duns_options DUNS options
+*      --> pt_duns4_options DUNS4 options
+*      --> pt_cage_options CAGE options
+*      --> pt_taxid_options TAXID options
+*      <-- pt_ccrupdates  CCR Updates
+*----------------------------------------------------------------------*
+FORM select_duns  USING value(pt_duns_options) TYPE STANDARD TABLE
+                        value(pt_duns4_options) TYPE STANDARD TABLE
+                        value(pt_cage_options) TYPE STANDARD TABLE
+                        value(pt_taxid_options) TYPE STANDARD TABLE
+                        value(pt_sam_uei_options) TYPE STANDARD TABLE "N2913517
+                        value(pt_sam_eft_options) TYPE STANDARD TABLE "N2913517
+                  CHANGING pt_ccrupdates TYPE STANDARD TABLE
+                           pt_samupdates TYPE STANDARD TABLE.         "N2913517
+
+  DATA: lt_100_duns TYPE STANDARD TABLE OF ty_option,
+        lv_lines TYPE i,
+        lv_max TYPE i VALUE '100',
+        lv_index TYPE i,
+        lt_updates TYPE STANDARD TABLE OF fmccrtupdates,
+        ls_update TYPE fmccrtupdates,
+        lt_samupd  TYPE STANDARD TABLE OF fmsamtupdates, "Note 2913517
+        ls_samupd TYPE fmsamtupdates.                    "Note 2913517
+
+  DESCRIBE TABLE pt_duns_options LINES lv_lines.
+
+  WHILE ( lv_lines GT 0 ).
+
+    IF lv_lines < lv_max.
+      lv_index = lv_lines.
+    ELSE.
+      lv_index = lv_max.
+    ENDIF.
+
+    APPEND LINES OF pt_duns_options FROM 1 TO lv_index TO lt_100_duns.
+    DELETE pt_duns_options FROM 1 TO lv_index.
+    IF p_samtab IS INITIAL.                              "Note 2913517
+      SELECT * FROM fmccrtupdates APPENDING TABLE lt_updates WHERE
+                                                 duns IN lt_100_duns
+                                                 AND excode EQ '2'.
+*Begin of Note 2913517 - Block 12
+    ELSE.
+      SELECT * FROM fmsamtupdates APPENDING TABLE lt_samupd WHERE
+                                                 duns IN lt_100_duns
+                                                 AND excode EQ '2'.
+    ENDIF.
+*End of Note 2913517 - Block 12
+    FREE lt_100_duns.
+    DESCRIBE TABLE pt_duns_options LINES lv_lines.
+
+  ENDWHILE.
+
+  LOOP AT lt_updates INTO ls_update WHERE duns4 IN pt_duns4_options
+                                    AND cage IN pt_cage_options
+                                    AND taxid IN pt_taxid_options.
+    APPEND ls_update TO pt_ccrupdates.
+  ENDLOOP.
+
+*Begin of Note 2913517 - Block 13
+  LOOP AT lt_samupd INTO ls_samupd WHERE sam_ue_id   IN pt_sam_uei_options
+                                     AND sam_eft_ind IN pt_sam_eft_options
+                                     AND cage        IN pt_cage_options
+                                     AND taxid       IN pt_taxid_options.
+    APPEND ls_samupd TO pt_samupdates.
+  ENDLOOP.
+*End of Note 2913517 - Block 13
+ENDFORM.                    " select_duns
+*&---------------------------------------------------------------------*
+*&      Form  select_duns4
+*&---------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+*      --> pt_duns4_options DUNS4 options
+*      --> pt_duns_options DUNS options
+*      --> pt_cage_options CAGE options
+*      --> pt_taxid_options TAXID options
+*      <-- pt_ccrupdates  CCR Updates
+*----------------------------------------------------------------------*
+FORM select_duns4  USING value(pt_duns4_options) TYPE STANDARD TABLE
+                         value(pt_duns_options) TYPE STANDARD TABLE
+                         value(pt_cage_options) TYPE STANDARD TABLE
+                         value(pt_taxid_options) TYPE STANDARD TABLE
+                         CHANGING pt_ccrupdates TYPE STANDARD TABLE.
+
+  DATA: lt_100_duns4 TYPE STANDARD TABLE OF ty_option,
+         lv_lines TYPE i,
+         lv_max TYPE i VALUE '100',
+         lv_index TYPE i,
+         lt_updates TYPE STANDARD TABLE OF fmccrtupdates,
+         ls_update TYPE fmccrtupdates.
+
+  DESCRIBE TABLE pt_duns4_options LINES lv_lines.
+
+  WHILE ( lv_lines GT 0 ).
+
+    IF lv_lines < lv_max.
+      lv_index = lv_lines.
+    ELSE.
+      lv_index = lv_max.
+    ENDIF.
+
+    APPEND LINES OF pt_duns4_options FROM 1 TO lv_index TO lt_100_duns4.
+    DELETE pt_duns4_options FROM 1 TO lv_index.
+    SELECT * FROM fmccrtupdates APPENDING TABLE lt_updates WHERE
+                                                 duns4 IN lt_100_duns4
+                                                 AND excode EQ '2'.
+    FREE lt_100_duns4.
+    DESCRIBE TABLE pt_duns4_options LINES lv_lines.
+
+  ENDWHILE.
+
+  LOOP AT lt_updates INTO ls_update WHERE duns IN pt_duns_options
+                                    AND cage IN pt_cage_options
+                                    AND taxid IN pt_taxid_options.
+    APPEND ls_update TO pt_ccrupdates.
+  ENDLOOP.
+
+ENDFORM.                    " select_duns4
+*&---------------------------------------------------------------------*
+*&      Form  get_cage
+*&---------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+*      --> pt_cage_options CAGE options
+*      --> pt_duns_options DUNS options
+*      --> pt_duns4_options DUNS4 options
+*      --> pt_taxid_options TAXID options
+*      <-- pt_ccrupdates  CCR Updates
+*----------------------------------------------------------------------*
+FORM select_cage   USING value(pt_cage_options) TYPE STANDARD TABLE
+                         value(pt_duns_options) TYPE STANDARD TABLE
+                         value(pt_duns4_options) TYPE STANDARD TABLE
+                         value(pt_taxid_options) TYPE STANDARD TABLE
+                         value(pt_sam_uei_options) TYPE STANDARD TABLE "N2913517
+                         value(pt_sam_eft_options) TYPE STANDARD TABLE "N2913517
+                   CHANGING pt_ccrupdates TYPE STANDARD TABLE
+                            pt_samupdates TYPE STANDARD TABLE.         "N2913517
+
+  DATA:   lt_100_cage TYPE STANDARD TABLE OF ty_option,
+          lv_lines TYPE i,
+          lv_max TYPE i VALUE '100',
+          lv_index TYPE i,
+          lt_updates TYPE STANDARD TABLE OF fmccrtupdates,
+          ls_update TYPE fmccrtupdates,
+          lt_samupd  TYPE STANDARD TABLE OF fmsamtupdates,   "N2913517
+          ls_samupd TYPE fmsamtupdates.                  "Note 2913517
+
+  DESCRIBE TABLE pt_cage_options LINES lv_lines.
+
+  WHILE ( lv_lines GT 0 ).
+
+    IF lv_lines < lv_max.
+      lv_index = lv_lines.
+    ELSE.
+      lv_index = lv_max.
+    ENDIF.
+
+    APPEND LINES OF pt_cage_options FROM 1 TO lv_index TO lt_100_cage.
+    DELETE pt_cage_options FROM 1 TO lv_index.
+    IF p_samtab IS INITIAL.                              "Note 2913517
+      SELECT * FROM fmccrtupdates APPENDING TABLE lt_updates WHERE
+                                                 cage IN lt_100_cage
+                                                 AND excode EQ '2'.
+*Begin of Note 2913517 - Block 14
+    ELSE.
+      SELECT * FROM fmsamtupdates APPENDING TABLE lt_samupd WHERE
+                                                 cage IN lt_100_cage
+                                                 AND excode EQ '2'.
+    ENDIF.
+*End of Note 2913517 - Block 14
+    FREE lt_100_cage.
+    DESCRIBE TABLE pt_cage_options LINES lv_lines.
+
+  ENDWHILE.
+
+  LOOP AT lt_updates INTO ls_update WHERE duns IN pt_duns_options
+                                    AND duns4 IN pt_duns4_options
+                                    AND taxid IN pt_taxid_options.
+    APPEND ls_update TO pt_ccrupdates.
+  ENDLOOP.
+
+*Begin of Note 2913517 - Block 15
+  LOOP AT lt_samupd INTO ls_samupd WHERE sam_ue_id   IN pt_sam_uei_options
+                                     AND sam_eft_ind IN pt_sam_eft_options
+                                     AND duns        IN pt_duns_options
+                                     AND taxid       IN pt_taxid_options.
+    APPEND ls_samupd TO pt_samupdates.
+  ENDLOOP.
+*End of Note 2913517 - Block 15
+
+ENDFORM.                    " select_cage
+*&---------------------------------------------------------------------*
+*&      Form  get_taxid
+*&---------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+*      --> pt_taxid_options TAXID options
+*      --> pt_duns_options DUNS options
+*      --> pt_duns4_options DUNS4 options
+*      --> pt_cage_options CAGE options
+*      <-- pt_ccrupdates  CCR Updates
+*----------------------------------------------------------------------*
+FORM select_taxid  USING value(pt_taxid_options) TYPE STANDARD TABLE
+                         value(pt_duns_options) TYPE STANDARD TABLE
+                         value(pt_duns4_options) TYPE STANDARD TABLE
+                         value(pt_cage_options) TYPE STANDARD TABLE
+                         value(pt_sam_uei_options) TYPE STANDARD TABLE "N2913517
+                         value(pt_sam_eft_options) TYPE STANDARD TABLE "N2913517
+                   CHANGING pt_ccrupdates TYPE STANDARD TABLE
+                            pt_samupdates TYPE STANDARD TABLE.         "N2913517
+
+  DATA:    lt_100_taxid TYPE STANDARD TABLE OF ty_option,
+           lv_lines TYPE i,
+           lv_max TYPE i VALUE '100',
+           lv_index TYPE i,
+           lt_updates TYPE STANDARD TABLE OF fmccrtupdates,
+           ls_update TYPE fmccrtupdates,
+           lt_samupd  TYPE STANDARD TABLE OF fmsamtupdates,  "N2913517
+           ls_samupd TYPE fmsamtupdates.                 "Note 2913517
+
+  DESCRIBE TABLE pt_taxid_options LINES lv_lines.
+
+  WHILE ( lv_lines GT 0 ).
+
+    IF lv_lines < lv_max.
+      lv_index = lv_lines.
+    ELSE.
+      lv_index = lv_max.
+    ENDIF.
+
+    APPEND LINES OF pt_taxid_options FROM 1 TO lv_index TO lt_100_taxid.
+    DELETE pt_taxid_options FROM 1 TO lv_index.
+    IF p_samtab IS INITIAL.                              "Note 2913517
+      SELECT * FROM fmccrtupdates APPENDING TABLE lt_updates WHERE
+                                                 taxid IN lt_100_taxid
+                                                 AND excode EQ '2'.
+*Begin of Note 2913517 - Block 16
+    ELSE.
+      SELECT * FROM fmsamtupdates APPENDING TABLE lt_samupd WHERE
+                                                 taxid IN lt_100_taxid
+                                                 AND excode EQ '2'.
+    ENDIF.
+*End of Note 2913517 - Block 16
+    FREE lt_100_taxid.
+    DESCRIBE TABLE pt_taxid_options LINES lv_lines.
+
+  ENDWHILE.
+
+  LOOP AT lt_updates INTO ls_update WHERE duns IN pt_duns_options
+                                    AND duns4 IN pt_duns4_options
+                                    AND cage IN pt_cage_options.
+    APPEND ls_update TO pt_ccrupdates.
+  ENDLOOP.
+
+*Begin of Note 2913517 - Block 17
+  LOOP AT lt_samupd INTO ls_samupd WHERE sam_ue_id   IN pt_sam_uei_options
+                                     AND sam_eft_ind IN pt_sam_eft_options
+                                     AND duns        IN pt_duns_options
+                                     AND cage        IN pt_cage_options.
+    APPEND ls_samupd TO pt_samupdates.
+  ENDLOOP.
+*End of Note 2913517 - Block 17
+
+ENDFORM.                    " select_taxid
